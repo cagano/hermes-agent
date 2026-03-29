@@ -95,6 +95,7 @@ class LoadedPlugin:
     module: Optional[types.ModuleType] = None
     tools_registered: List[str] = field(default_factory=list)
     hooks_registered: List[str] = field(default_factory=list)
+    commands_registered: List[str] = field(default_factory=list)
     enabled: bool = False
     error: Optional[str] = None
 
@@ -160,6 +161,44 @@ class PluginContext:
         self._manager._hooks.setdefault(hook_name, []).append(callback)
         logger.debug("Plugin %s registered hook: %s", self.manifest.name, hook_name)
 
+    # -- command registration -----------------------------------------------
+
+    def register_command(
+        self,
+        name: str,
+        handler: Callable,
+        description: str = "",
+        aliases: tuple = (),
+        args_hint: str = "",
+        cli_only: bool = False,
+        gateway_only: bool = False,
+    ) -> None:
+        """Register a slash command in the central command registry.
+
+        The handler is called with a single args string (everything
+        after the command name) and should return a string to display to the
+        user, or None for no output.
+
+        The command automatically appears in /help, tab-autocomplete,
+        Telegram bot menu, Slack subcommand mapping, and gateway dispatch.
+        """
+        from hermes_cli.commands import CommandDef, register_plugin_command
+
+        cmd_def = CommandDef(
+            name=name,
+            description=description or f"Plugin command: {name}",
+            category="Plugins",
+            aliases=aliases,
+            args_hint=args_hint,
+            cli_only=cli_only,
+            gateway_only=gateway_only,
+        )
+        register_plugin_command(cmd_def)
+        self._manager._plugin_commands[name] = handler
+        for alias in aliases:
+            self._manager._plugin_commands[alias] = handler
+        logger.debug("Plugin %s registered command: /%s", self.manifest.name, name)
+
 
 # ---------------------------------------------------------------------------
 # PluginManager
@@ -172,6 +211,7 @@ class PluginManager:
         self._plugins: Dict[str, LoadedPlugin] = {}
         self._hooks: Dict[str, List[Callable]] = {}
         self._plugin_tool_names: Set[str] = set()
+        self._plugin_commands: Dict[str, Callable] = {}
         self._discovered: bool = False
 
     # -----------------------------------------------------------------------
@@ -465,6 +505,11 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
 def get_plugin_tool_names() -> Set[str]:
     """Return the set of tool names registered by plugins."""
     return get_plugin_manager()._plugin_tool_names
+
+
+def get_plugin_command_handler(name: str) -> Optional[Callable]:
+    """Return the handler for a plugin-registered slash command, or None."""
+    return get_plugin_manager()._plugin_commands.get(name)
 
 
 def get_plugin_toolsets() -> List[tuple]:

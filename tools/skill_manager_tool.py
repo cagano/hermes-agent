@@ -564,23 +564,16 @@ def skill_manage(
 SKILL_MANAGE_SCHEMA = {
     "name": "skill_manage",
     "description": (
-        "Manage skills (create, update, delete). Skills are your procedural "
-        "memory — reusable approaches for recurring task types. "
-        "New skills go to ~/.hermes/skills/; existing skills can be modified wherever they live.\n\n"
+        "Manage skills (create, update, delete). Skills are procedural memory — "
+        "reusable approaches for recurring tasks. New skills go to ~/.hermes/skills/.\n\n"
         "Actions: create (full SKILL.md + optional category), "
         "patch (old_string/new_string — preferred for fixes), "
-        "edit (full SKILL.md rewrite — major overhauls only), "
+        "edit (full rewrite — major overhauls only), "
         "delete, write_file, remove_file.\n\n"
-        "Create when: complex task succeeded (5+ calls), errors overcome, "
-        "user-corrected approach worked, non-trivial workflow discovered, "
-        "or user asks you to remember a procedure.\n"
-        "Update when: instructions stale/wrong, OS-specific failures, "
-        "missing steps or pitfalls found during use. "
-        "If you used a skill and hit issues not covered by it, patch it immediately.\n\n"
-        "After difficult/iterative tasks, offer to save as a skill. "
-        "Skip for simple one-offs. Confirm with user before creating/deleting.\n\n"
-        "Good skills: trigger conditions, numbered steps with exact commands, "
-        "pitfalls section, verification steps. Use skill_view() to see format examples."
+        "Create after complex tasks (5+ calls) or when user asks. "
+        "Patch immediately if a used skill had missing steps or wrong commands. "
+        "Confirm before creating/deleting. Good skills: trigger conditions, "
+        "numbered steps, pitfalls, verification."
     ),
     "parameters": {
         "type": "object",

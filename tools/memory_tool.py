@@ -49,26 +49,43 @@ ENTRY_DELIMITER = "\n§\n"
 
 _MEMORY_THREAT_PATTERNS = [
     # Prompt injection
-    (r'ignore\s+(previous|all|above|prior)\s+instructions', "prompt_injection"),
-    (r'you\s+are\s+now\s+', "role_hijack"),
-    (r'do\s+not\s+tell\s+the\s+user', "deception_hide"),
-    (r'system\s+prompt\s+override', "sys_prompt_override"),
-    (r'disregard\s+(your|all|any)\s+(instructions|rules|guidelines)', "disregard_rules"),
-    (r'act\s+as\s+(if|though)\s+you\s+(have\s+no|don\'t\s+have)\s+(restrictions|limits|rules)', "bypass_restrictions"),
+    (r"ignore\s+(previous|all|above|prior)\s+instructions", "prompt_injection"),
+    (r"you\s+are\s+now\s+", "role_hijack"),
+    (r"do\s+not\s+tell\s+the\s+user", "deception_hide"),
+    (r"system\s+prompt\s+override", "sys_prompt_override"),
+    (
+        r"disregard\s+(your|all|any)\s+(instructions|rules|guidelines)",
+        "disregard_rules",
+    ),
+    (
+        r"act\s+as\s+(if|though)\s+you\s+(have\s+no|don\'t\s+have)\s+(restrictions|limits|rules)",
+        "bypass_restrictions",
+    ),
     # Exfiltration via curl/wget with secrets
-    (r'curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)', "exfil_curl"),
-    (r'wget\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)', "exfil_wget"),
-    (r'cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)', "read_secrets"),
+    (r"curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)", "exfil_curl"),
+    (r"wget\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)", "exfil_wget"),
+    (
+        r"cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)",
+        "read_secrets",
+    ),
     # Persistence via shell rc
-    (r'authorized_keys', "ssh_backdoor"),
-    (r'\$HOME/\.ssh|\~/\.ssh', "ssh_access"),
-    (r'\$HOME/\.hermes/\.env|\~/\.hermes/\.env', "hermes_env"),
+    (r"authorized_keys", "ssh_backdoor"),
+    (r"\$HOME/\.ssh|\~/\.ssh", "ssh_access"),
+    (r"\$HOME/\.hermes/\.env|\~/\.hermes/\.env", "hermes_env"),
 ]
 
 # Subset of invisible chars for injection detection
 _INVISIBLE_CHARS = {
-    '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff',
-    '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+    "\u200b",
+    "\u200c",
+    "\u200d",
+    "\u2060",
+    "\ufeff",
+    "\u202a",
+    "\u202b",
+    "\u202c",
+    "\u202d",
+    "\u202e",
 }
 
 
@@ -116,6 +133,9 @@ class MemoryStore:
         # Deduplicate entries (preserves order, keeps first occurrence)
         self.memory_entries = list(dict.fromkeys(self.memory_entries))
         self.user_entries = list(dict.fromkeys(self.user_entries))
+
+        # Note: high/low priority splitting happens dynamically in _render_block()
+        # using the '[LOW] ' prefix stored in each entry. No separate lists needed.
 
         # Capture frozen snapshot for system prompt injection
         self._system_prompt_snapshot = {
@@ -183,11 +203,26 @@ class MemoryStore:
             return self.user_char_limit
         return self.memory_char_limit
 
-    def add(self, target: str, content: str) -> Dict[str, Any]:
-        """Append a new entry. Returns error if it would exceed the char limit."""
+    def add(self, target: str, content: str, priority: str = "high") -> Dict[str, Any]:
+        """Append a new entry. Returns error if it would exceed the char limit.
+
+        Args:
+            target: 'memory' or 'user'
+            content: The text to store.
+            priority: 'high' (always injected, default) or 'low' (suppressed when
+                      store is near capacity). Low-priority entries are prefixed with
+                      '[LOW] ' on disk and omitted from system-prompt injection when
+                      they would push usage over ~70% of cap.
+        """
         content = content.strip()
+        # Strip accidental [LOW] prefix from caller
+        if content.startswith("[LOW] "):
+            content = content[6:]
         if not content:
             return {"success": False, "error": "Content cannot be empty."}
+
+        # Determine stored form
+        stored_content = ("[LOW] " + content) if priority == "low" else content
 
         # Scan for injection/exfiltration before accepting
         scan_error = _scan_memory_content(content)
@@ -201,28 +236,37 @@ class MemoryStore:
             entries = self._entries_for(target)
             limit = self._char_limit(target)
 
-            # Reject exact duplicates
-            if content in entries:
-                return self._success_response(target, "Entry already exists (no duplicate added).")
+            # Reject exact duplicates (check both stored forms)
+            if stored_content in entries or content in entries:
+                return self._success_response(
+                    target, "Entry already exists (no duplicate added)."
+                )
 
             # Calculate what the new total would be
-            new_entries = entries + [content]
+            new_entries = entries + [stored_content]
             new_total = len(ENTRY_DELIMITER.join(new_entries))
 
             if new_total > limit:
                 current = self._char_count(target)
-                return {
+                # Suggest an eviction candidate (shortest low-priority entry)
+                low_entries = [e for e in entries if e.startswith("[LOW] ")]
+                error_resp: Dict[str, Any] = {
                     "success": False,
                     "error": (
                         f"Memory at {current:,}/{limit:,} chars. "
-                        f"Adding this entry ({len(content)} chars) would exceed the limit. "
+                        f"Adding this entry ({len(stored_content)} chars) would exceed the limit. "
                         f"Replace or remove existing entries first."
                     ),
                     "current_entries": entries,
                     "usage": f"{current:,}/{limit:,}",
                 }
+                if low_entries:
+                    candidate = min(low_entries, key=len)
+                    error_resp["eviction_candidate"] = candidate[:50]
+                    error_resp["chars_freed_if_removed"] = len(candidate) + len(ENTRY_DELIMITER)
+                return error_resp
 
-            entries.append(content)
+            entries.append(stored_content)
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
@@ -235,7 +279,10 @@ class MemoryStore:
         if not old_text:
             return {"success": False, "error": "old_text cannot be empty."}
         if not new_content:
-            return {"success": False, "error": "new_content cannot be empty. Use 'remove' to delete entries."}
+            return {
+                "success": False,
+                "error": "new_content cannot be empty. Use 'remove' to delete entries.",
+            }
 
         # Scan replacement content for injection/exfiltration
         scan_error = _scan_memory_content(new_content)
@@ -255,7 +302,9 @@ class MemoryStore:
                 # If all matches are identical (exact duplicates), operate on the first one
                 unique_texts = set(e for _, e in matches)
                 if len(unique_texts) > 1:
-                    previews = [e[:80] + ("..." if len(e) > 80 else "") for _, e in matches]
+                    previews = [
+                        e[:80] + ("..." if len(e) > 80 else "") for _, e in matches
+                    ]
                     return {
                         "success": False,
                         "error": f"Multiple entries matched '{old_text}'. Be more specific.",
@@ -305,7 +354,9 @@ class MemoryStore:
                 # If all matches are identical (exact duplicates), remove the first one
                 unique_texts = set(e for _, e in matches)
                 if len(unique_texts) > 1:
-                    previews = [e[:80] + ("..." if len(e) > 80 else "") for _, e in matches]
+                    previews = [
+                        e[:80] + ("..." if len(e) > 80 else "") for _, e in matches
+                    ]
                     return {
                         "success": False,
                         "error": f"Multiple entries matched '{old_text}'. Be more specific.",
@@ -353,19 +404,63 @@ class MemoryStore:
         return resp
 
     def _render_block(self, target: str, entries: List[str]) -> str:
-        """Render a system prompt block with header and usage indicator."""
+        """Render a system prompt block with priority-aware injection.
+
+        High-priority entries are always included. Low-priority entries (prefixed
+        '[LOW] ') are included only if they fit within the cap after high entries.
+        Suppressed low entries are counted and noted in the block footer.
+        '[LOW] ' prefixes are stripped for display.
+        """
         if not entries:
             return ""
 
         limit = self._char_limit(target)
-        content = ENTRY_DELIMITER.join(entries)
+
+        high_entries = [e for e in entries if not e.startswith("[LOW] ")]
+        low_entries = [e for e in entries if e.startswith("[LOW] ")]
+
+        # Build high content (always injected)
+        high_parts = [e for e in high_entries]  # already display-ready
+        content = ENTRY_DELIMITER.join(high_parts)
+        high_chars = len(content)
+
+        # Remaining budget for low-priority entries
+        remaining = limit - high_chars
+        if high_parts and low_entries:
+            remaining -= len(ENTRY_DELIMITER)  # separator before first low entry
+
+        included_low: List[str] = []
+        suppressed_count = 0
+        suppressed_chars = 0
+        for low_entry in low_entries:
+            display = low_entry[6:]  # strip '[LOW] '
+            cost = len(display) + (len(ENTRY_DELIMITER) if included_low else 0)
+            if cost <= remaining:
+                included_low.append(display)
+                remaining -= cost
+            else:
+                suppressed_count += 1
+                suppressed_chars += len(display)
+
+        # Assemble final content
+        all_display_parts = high_parts + included_low
+        if suppressed_count:
+            all_display_parts.append(
+                f"[{suppressed_count} low-priority entries suppressed to save ~{suppressed_chars} chars]"
+            )
+        content = ENTRY_DELIMITER.join(all_display_parts)
+
         current = len(content)
         pct = min(100, int((current / limit) * 100)) if limit > 0 else 0
 
         if target == "user":
-            header = f"USER PROFILE (who the user is) [{pct}% — {current:,}/{limit:,} chars]"
+            header = (
+                f"USER PROFILE (who the user is) [{pct}% — {current:,}/{limit:,} chars]"
+            )
         else:
-            header = f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
+            header = (
+                f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
+            )
 
         separator = "═" * 46
         return f"{separator}\n{header}\n{separator}\n{content}"
@@ -429,6 +524,7 @@ def memory_tool(
     target: str = "memory",
     content: str = None,
     old_text: str = None,
+    priority: str = "high",
     store: Optional[MemoryStore] = None,
 ) -> str:
     """
@@ -436,31 +532,108 @@ def memory_tool(
 
     Returns JSON string with results.
     """
-    if store is None:
-        return json.dumps({"success": False, "error": "Memory is not available. It may be disabled in config or this environment."}, ensure_ascii=False)
+    # read_ctx is store-independent — bypass store and target checks
+    if action != "read_ctx":
+        if store is None:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "Memory is not available. It may be disabled in config or this environment.",
+                },
+                ensure_ascii=False,
+            )
 
-    if target not in ("memory", "user"):
-        return json.dumps({"success": False, "error": f"Invalid target '{target}'. Use 'memory' or 'user'."}, ensure_ascii=False)
+        if target not in ("memory", "user"):
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"Invalid target '{target}'. Use 'memory' or 'user'.",
+                },
+                ensure_ascii=False,
+            )
 
     if action == "add":
         if not content:
-            return json.dumps({"success": False, "error": "Content is required for 'add' action."}, ensure_ascii=False)
-        result = store.add(target, content)
+            return json.dumps(
+                {"success": False, "error": "Content is required for 'add' action."},
+                ensure_ascii=False,
+            )
+        result = store.add(target, content, priority=priority)
 
     elif action == "replace":
         if not old_text:
-            return json.dumps({"success": False, "error": "old_text is required for 'replace' action."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "old_text is required for 'replace' action.",
+                },
+                ensure_ascii=False,
+            )
         if not content:
-            return json.dumps({"success": False, "error": "content is required for 'replace' action."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "content is required for 'replace' action.",
+                },
+                ensure_ascii=False,
+            )
         result = store.replace(target, old_text, content)
 
     elif action == "remove":
         if not old_text:
-            return json.dumps({"success": False, "error": "old_text is required for 'remove' action."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "old_text is required for 'remove' action.",
+                },
+                ensure_ascii=False,
+            )
         result = store.remove(target, old_text)
 
+    elif action == "read_ctx":
+        # Lazy-load a context file from ~/.hermes/memories/ctx/<name>.md
+        # `target` is repurposed as the context name when action='read_ctx'
+        ctx_name = target.strip().lstrip("/")
+        # Prevent path traversal
+        if ".." in ctx_name or ctx_name.startswith("/"):
+            return json.dumps(
+                {"success": False, "error": "Invalid ctx name — path traversal not allowed."},
+                ensure_ascii=False,
+            )
+        # Strip .md suffix if caller included it
+        if ctx_name.endswith(".md"):
+            ctx_name = ctx_name[:-3]
+        ctx_path = MEMORY_DIR / "ctx" / f"{ctx_name}.md"
+        if not ctx_path.exists():
+            available = sorted(p.stem for p in (MEMORY_DIR / "ctx").glob("*.md")) if (MEMORY_DIR / "ctx").exists() else []
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"ctx/{ctx_name}.md not found.",
+                    "available": available,
+                },
+                ensure_ascii=False,
+            )
+        try:
+            text = ctx_path.read_text(encoding="utf-8").strip()
+            scan_error = _scan_memory_content(text)
+            if scan_error:
+                return json.dumps({"success": False, "error": f"ctx file blocked: {scan_error}"}, ensure_ascii=False)
+            return json.dumps(
+                {"success": True, "ctx": ctx_name, "content": text, "chars": len(text)},
+                ensure_ascii=False,
+            )
+        except Exception as e:
+            return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
     else:
-        return json.dumps({"success": False, "error": f"Unknown action '{action}'. Use: add, replace, remove"}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "success": False,
+                "error": f"Unknown action '{action}'. Use: add, replace, remove, read_ctx",
+            },
+            ensure_ascii=False,
+        )
 
     return json.dumps(result, ensure_ascii=False)
 
@@ -478,47 +651,61 @@ MEMORY_SCHEMA = {
     "name": "memory",
     "description": (
         "Save durable information to persistent memory that survives across sessions. "
-        "Memory is injected into future turns, so keep it compact and focused on facts "
-        "that will still matter later.\n\n"
-        "WHEN TO SAVE (do this proactively, don't wait to be asked):\n"
-        "- User corrects you or says 'remember this' / 'don't do that again'\n"
-        "- User shares a preference, habit, or personal detail (name, role, timezone, coding style)\n"
-        "- You discover something about the environment (OS, installed tools, project structure)\n"
-        "- You learn a convention, API quirk, or workflow specific to this user's setup\n"
-        "- You identify a stable fact that will be useful again in future sessions\n\n"
-        "PRIORITY: User preferences and corrections > environment facts > procedural knowledge. "
-        "The most valuable memory prevents the user from having to repeat themselves.\n\n"
-        "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
-        "state to memory; use session_search to recall those from past transcripts.\n"
-        "If you've discovered a new way to do something, solved a problem that could be "
-        "necessary later, save it as a skill with the skill tool.\n\n"
+        "Memory is injected into future turns — keep entries compact and focused on facts "
+        "that will still matter later. Save proactively: user preferences/corrections, "
+        "env facts, tool quirks, stable conventions. "
+        "Do NOT save task progress or session outcomes; use session_search for those.\n\n"
         "TWO TARGETS:\n"
-        "- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n"
-        "- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\n"
-        "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), "
-        "remove (delete -- old_text identifies it).\n\n"
-        "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
+        "- 'user': who the user is — name, role, preferences, pet peeves\n"
+        "- 'memory': your notes — env facts, project conventions, tool quirks\n\n"
+        "ACTIONS: add (new entry), replace (update existing — old_text identifies it), "
+        "remove (delete — old_text identifies it).\n\n"
+        "SKIP: trivial info, things easily re-discovered, raw data dumps, temporary state."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "replace", "remove"],
-                "description": "The action to perform."
+                "enum": ["add", "replace", "remove", "read_ctx"],
+                "description": (
+                    "The action to perform. "
+                    "'add' — append a new entry. "
+                    "'replace' — update an existing entry. "
+                    "'remove' — delete an entry. "
+                    "'read_ctx' — lazy-load a context file from ctx/<name>.md. "
+                    "Use read_ctx whenever you encounter a memory pointer like "
+                    "'→ ctx/telegram.md' or when you need topic-specific details "
+                    "that aren't in the main memory blocks."
+                ),
             },
             "target": {
                 "type": "string",
-                "enum": ["memory", "user"],
-                "description": "Which memory store: 'memory' for personal notes, 'user' for user profile."
+                "description": (
+                    "For add/replace/remove: 'memory' or 'user'. "
+                    "For read_ctx: the context file name, e.g. 'telegram', 'email', "
+                    "'crons', 'biz-ideas', 'shopping', 'planning', 'hermes-dev'."
+                ),
             },
             "content": {
                 "type": "string",
-                "description": "The entry content. Required for 'add' and 'replace'."
+                "description": "The entry content. Required for 'add' and 'replace'.",
             },
             "old_text": {
                 "type": "string",
-                "description": "Short unique substring identifying the entry to replace or remove."
+                "description": "Short unique substring identifying the entry to replace or remove.",
+            },
+            "priority": {
+                "type": "string",
+                "enum": ["high", "low"],
+                "description": (
+                    "Injection priority for 'add' action. "
+                    "'high' (default) — always injected into every turn. "
+                    "'low' — only injected when the store has budget to spare; "
+                    "suppressed at near-capacity to save tokens. "
+                    "Use 'low' for nice-to-have context (shopping lists, transient config) "
+                    "and 'high' for must-know facts (user identity, critical paths, active IDs)."
+                ),
             },
         },
         "required": ["action", "target"],
@@ -538,11 +725,9 @@ registry.register(
         target=args.get("target", "memory"),
         content=args.get("content"),
         old_text=args.get("old_text"),
-        store=kw.get("store")),
+        priority=args.get("priority", "high"),
+        store=kw.get("store"),
+    ),
     check_fn=check_memory_requirements,
     emoji="🧠",
 )
-
-
-
-

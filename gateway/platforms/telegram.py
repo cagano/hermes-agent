@@ -1877,6 +1877,12 @@ class TelegramAdapter(BasePlatformAdapter):
                     if not chat_topic:
                         chat_topic = created_name
 
+            # Only preserve DM thread_id when the topic is recognized.
+            # Otherwise replies can keep targeting stale/ephemeral DM thread IDs
+            # that no longer exist, causing noisy "Thread X not found" warnings.
+            if not chat_topic:
+                thread_id_str = None
+
         # Build source
         source = self.build_source(
             chat_id=str(chat.id),

@@ -135,18 +135,17 @@ def _discover_tools():
     Wrapped in a function so import errors in optional tools (e.g., fal_client
     not installed) don't prevent the rest from loading.
     """
+    # Core tools — always imported
     _modules = [
         "tools.web_tools",
         "tools.terminal_tool",
         "tools.file_tools",
         "tools.vision_tools",
-        "tools.mixture_of_agents_tool",
         "tools.image_generation_tool",
         "tools.skills_tool",
         "tools.skill_manager_tool",
         "tools.browser_tool",
         "tools.cronjob_tools",
-        "tools.rl_training_tool",
         "tools.tts_tool",
         "tools.todo_tool",
         "tools.memory_tool",
@@ -156,15 +155,30 @@ def _discover_tools():
         "tools.delegate_tool",
         "tools.process_registry",
         "tools.send_message_tool",
-        "tools.honcho_tools",
-        "tools.homeassistant_tool",
+        "tools.honcho_tools",  # injected at runtime; must always register
     ]
-    import importlib
+    import importlib, os as _os
     for mod_name in _modules:
         try:
             importlib.import_module(mod_name)
         except Exception as e:
             logger.warning("Could not import tool module %s: %s", mod_name, e)
+
+    # Conditional tools — only imported when their guard env vars are present (OPT-3)
+    _conditional_modules = [
+        # (module, env_var_that_gates_it)
+        ("tools.rl_training_tool",        "TINKER_API_KEY"),
+        ("tools.homeassistant_tool",      "HASS_TOKEN"),
+        ("tools.mixture_of_agents_tool",  "OPENROUTER_API_KEY"),
+    ]
+    for mod_name, env_var in _conditional_modules:
+        if _os.getenv(env_var):
+            try:
+                importlib.import_module(mod_name)
+            except Exception as e:
+                logger.warning("Could not import conditional tool module %s: %s", mod_name, e)
+        else:
+            logger.debug("Skipping %s (env var %s not set)", mod_name, env_var)
 
 
 _discover_tools()

@@ -747,23 +747,17 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None) -> dict:
 
     description = (
         "Run a Python script that can call Hermes tools programmatically. "
-        "Use this when you need 3+ tool calls with processing logic between them, "
-        "need to filter/reduce large tool outputs before they enter your context, "
-        "need conditional branching (if X then Y else Z), or need to loop "
-        "(fetch N pages, process N files, retry on failure).\n\n"
-        "Use normal tool calls instead when: single tool call with no processing, "
-        "you need to see the full result and apply complex reasoning, "
-        "or the task requires interactive user input.\n\n"
+        "Use when you need 3+ tool calls with processing logic, need to filter/reduce large outputs, "
+        "need conditional branching, or need to loop. "
+        "Use normal tool calls for single calls, full-result reasoning, or interactive input.\n\n"
         f"Available via `from hermes_tools import ...`:\n\n"
         f"{tool_lines}\n\n"
-        "Limits: 5-minute timeout, 50KB stdout cap, max 50 tool calls per script. "
-        "terminal() is foreground-only (no background or pty).\n\n"
-        "Print your final result to stdout. Use Python stdlib (json, re, math, csv, "
-        "datetime, collections, etc.) for processing between tool calls.\n\n"
-        "Also available (no import needed — built into hermes_tools):\n"
-        "  json_parse(text: str) — json.loads with strict=False; use for terminal() output with control chars\n"
-        "  shell_quote(s: str) — shlex.quote(); use when interpolating dynamic strings into shell commands\n"
-        "  retry(fn, max_attempts=3, delay=2) — retry with exponential backoff for transient failures"
+        "Limits: 5-min timeout, 50KB stdout cap, max 50 tool calls per script. "
+        "terminal() is foreground-only. Print your final result to stdout.\n\n"
+        "Also available (no import needed):\n"
+        "  json_parse(text) — json.loads with strict=False\n"
+        "  shell_quote(s) — shlex.quote()\n"
+        "  retry(fn, max_attempts=3, delay=2) — exponential backoff"
     )
 
     return {

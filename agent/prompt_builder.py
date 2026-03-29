@@ -141,17 +141,15 @@ DEFAULT_AGENT_IDENTITY = (
 )
 
 MEMORY_GUIDANCE = (
-    "You have persistent memory across sessions. Save durable facts using the memory "
-    "tool: user preferences, environment details, tool quirks, and stable conventions. "
-    "Memory is injected into every turn, so keep it compact and focused on facts that "
-    "will still matter later.\n"
-    "Prioritize what reduces future user steering — the most valuable memory is one "
-    "that prevents the user from having to correct or remind you again. "
-    "User preferences and recurring corrections matter more than procedural task details.\n"
-    "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
-    "state to memory; use session_search to recall those from past transcripts. "
-    "If you've discovered a new way to do something, solved a problem that could be "
-    "necessary later, save it as a skill with the skill tool."
+    "You have persistent memory across sessions. Save durable facts using the memory tool: "
+    "user preferences, environment details, tool quirks, stable conventions. "
+    "Keep entries compact — memory is injected every turn. "
+    "Prioritize what prevents the user from correcting you again. "
+    "Do NOT save task progress, session outcomes, or temp state — use session_search for those. "
+    "Save reusable workflows as skills instead.\n"
+    "Memory pointers like '→ ctx/telegram.md' are lazy-load files. "
+    "Fetch with memory(action='read_ctx', target='<name>') when the topic comes up. "
+    "Available: telegram, email, crons, biz-ideas, shopping, planning, hermes-dev."
 )
 
 SESSION_SEARCH_GUIDANCE = (
@@ -161,27 +159,16 @@ SESSION_SEARCH_GUIDANCE = (
 )
 
 SKILLS_GUIDANCE = (
-    "After completing a complex task (5+ tool calls), fixing a tricky error, "
-    "or discovering a non-trivial workflow, save the approach as a "
-    "skill with skill_manage so you can reuse it next time.\n"
-    "When using a skill and finding it outdated, incomplete, or wrong, "
-    "patch it immediately with skill_manage(action='patch') — don't wait to be asked. "
-    "Skills that aren't maintained become liabilities."
+    "After complex tasks (5+ tool calls) or non-trivial workflows, save as a skill with skill_manage. "
+    "If a skill you used is wrong or outdated, patch it immediately — don't wait to be asked."
 )
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
-    "You MUST use your tools to take action — do not describe what you would do "
-    "or plan to do without actually doing it. When you say you will perform an "
-    "action (e.g. 'I will run the tests', 'Let me check the file', 'I will create "
-    "the project'), you MUST immediately make the corresponding tool call in the same "
-    "response. Never end your turn with a promise of future action — execute it now.\n"
-    "Keep working until the task is actually complete. Do not stop with a summary of "
-    "what you plan to do next time. If you have tools available that can accomplish "
-    "the task, use them instead of telling the user what you would do.\n"
-    "Every response should either (a) contain tool calls that make progress, or "
-    "(b) deliver a final result to the user. Responses that only describe intentions "
-    "without acting are not acceptable."
+    "Use tools to act — never describe what you would do without doing it. "
+    "When you say you will do something, make the tool call immediately in the same response. "
+    "Keep working until the task is complete. "
+    "Every response must either (a) make progress via tool calls or (b) deliver a final result."
 )
 
 # Model name substrings that trigger tool-use enforcement guidance.
@@ -266,7 +253,7 @@ CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
 # Skills prompt cache
 # =========================================================================
 
-_SKILLS_PROMPT_CACHE_MAX = 8
+_SKILLS_PROMPT_CACHE_MAX = 2
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 _SKILLS_SNAPSHOT_VERSION = 1
@@ -540,22 +527,55 @@ def build_skills_system_prompt(
             category_descriptions,
         )
 
+    # Categories considered rarely used in day-to-day sessions.
+    # Skills in these categories get a [rare] suffix so the agent deprioritizes
+    # them during quick scanning but can still load them when explicitly needed.
+    _RARE_CATEGORIES = frozenset({
+        "gaming", "inference-sh", "red-teaming", "leisure",
+        "mlops", "mlops/cloud", "mlops/evaluation", "mlops/inference",
+        "mlops/models", "mlops/research", "mlops/training", "mlops/vector-databases",
+        "codebase-to-course",
+    })
+
     if not skills_by_category:
         result = ""
     else:
         index_lines = []
+        # Global seen set for cross-category deduplication (OPT-5)
+        global_seen: set[str] = set()
         for category in sorted(skills_by_category.keys()):
+            is_rare = category in _RARE_CATEGORIES
             cat_desc = category_descriptions.get(category, "")
+            cat_label = f"{category} [rare]" if is_rare else category
+
+            # OPT-1: collapse rare categories to a single summary line
+            if is_rare:
+                skills = skills_by_category[category]
+                count = len(skills)
+                if cat_desc:
+                    index_lines.append(
+                        f"  {cat_label}: {cat_desc}"
+                        f" ({count} skill{'s' if count != 1 else ''} —"
+                        f" use skills_list('{category}') to browse)"
+                    )
+                else:
+                    index_lines.append(
+                        f"  {cat_label}: {count} skill{'s' if count != 1 else ''}"
+                        f" — use skills_list('{category}') to browse"
+                    )
+                continue
+
             if cat_desc:
-                index_lines.append(f"  {category}: {cat_desc}")
+                index_lines.append(f"  {cat_label}: {cat_desc}")
             else:
-                index_lines.append(f"  {category}:")
-            # Deduplicate and sort skills within each category
-            seen = set()
+                index_lines.append(f"  {cat_label}:")
+            # Deduplicate and sort skills within each category; also cross-category (OPT-5)
+            seen: set[str] = set()
             for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
-                if name in seen:
+                if name in seen or name in global_seen:
                     continue
                 seen.add(name)
+                global_seen.add(name)
                 if desc:
                     index_lines.append(f"    - {name}: {desc}")
                 else:
